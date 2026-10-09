@@ -68,6 +68,11 @@ const _refinePlan = async text => DEMO ? (await demo()).demoRefine(S()) : LOCAL(
 export const refinePlan = (...a) => _refinePlan(...a).then(track)
 const _requestDebrief = async workoutId => DEMO ? (await demo()).demoDebrief(S(), workoutId) : LOCAL() ? (await local()).localDebrief(S(), workoutId) : api('/api/coach/debrief', { method: 'POST', body: JSON.stringify({ workoutId: workoutId || null, lang: getLang() }) })
 export const requestDebrief = (...a) => _requestDebrief(...a).then(track)
+const _requestWorkout = async (message, session) => DEMO
+  ? (await demo()).demoWorkout(S(), message, session)
+  : LOCAL() ? (await local()).localWorkout(S(), message, session)
+    : api('/api/coach/workout', { method: 'POST', body: JSON.stringify({ message, session, lang: getLang() }) })
+export const requestWorkout = (...a) => _requestWorkout(...a).then(track)
 // The room: anonymous medians across the profiles on this instance that opted in. Only a
 // server has a room; a phone with its own key and the demo both answer locally.
 export const cohortStats = async () => DEMO ? (await demo()).demoCohort(S()) : LOCAL() ? { ok: false, enabled: false } : api('/api/coach/cohort')

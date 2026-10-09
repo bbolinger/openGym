@@ -46,6 +46,11 @@ import { nextOpenSet, workoutKeyAction } from '../lib/workout-keys.js'
 import { MUSCLE_NAME } from '../lib/muscles.js'
 import FocusView from './FocusView.jsx'
 import { entryDbLoad, bellsIn, ownedWeightsFor, stepOwned } from '../lib/dumbbells.js'
+import { coachAvailable, hasConsent } from '../lib/coach.js'
+import { ensureWorkoutEntryKeys } from '../lib/workout-coach.js'
+import { DEMO } from '../lib/demo.js'
+import { MOBILE } from '../lib/mobile.js'
+import WorkoutCoachSheet, { rememberDiscardedWorkout } from '../components/WorkoutCoachSheet.jsx'
 
 // How long after a key starts a hold the same key is not yet its "Done" (#133). A USB button
 // that bounces, or a double press, sends two presses a moment apart: the first starts the hold,
@@ -103,7 +108,7 @@ const RTL_LETTER = /[֐-ࣿיִ-﷿ﹰ-﻿]/
 // enough to turn over, far shorter than the rest the set earns once both sides are held.
 const SWITCH_SIDES_SEC = 10
 
-function ExerciseBlock({ entryIdx, compact, dense, editing, onToggle, onToggleSide, onField, onAddSet, onRemoveSet, onAddWarmup, onRemoveSetAt, onCopySetAt, onStartTimed, onPairPrev, onPairNext, onSetRowRef, onProgressionSettings, onRest, onNoProg, routineUpdate, onSwap, onMoveUp, onMoveDown, canMoveUp, canMoveDown, onRemoveExercise, busy }) {
+function ExerciseBlock({ entryIdx, compact, dense, editing, onToggle, onToggleSide, onField, onAddSet, onRemoveSet, onAddWarmup, onRemoveSetAt, onCopySetAt, onStartTimed, onPairPrev, onPairNext, onSetRowRef, onProgressionSettings, onRest, onNoProg, routineUpdate, onSwap, onAskCoach, onMoveUp, onMoveDown, canMoveUp, canMoveDown, onRemoveExercise, busy }) {
   const S = useStore(s => s.S)
   const update = useStore(s => s.update)
   const working = useUI(s => s.work)
@@ -400,6 +405,7 @@ function ExerciseBlock({ entryIdx, compact, dense, editing, onToggle, onToggleSi
     sections: [
       { title: t('Today'), items: [
         onSwap && { icon: 'swap', label: t('Swap exercise'), onClick: onSwap, disabled: busy },
+        onAskCoach && { icon: 'sparkles', label: t('Ask Coach about this exercise'), onClick: onAskCoach },
         { icon: 'sunrise', label: t('Add warm-up set'), onClick: onAddWarmup },
         { icon: 'note', label: entry.note ? t('Edit note') : t('Add note'), sub: entry.note || undefined, onClick: () => exerciseNoteSheet(entryIdx) },
         onNoProg && { icon: 'chartLineSlash', label: t('Don’t count for progression'), sub: t('This exercise, this session only'), on: entry.noProg === true, onClick: () => onNoProg(entry.noProg !== true) },
@@ -636,6 +642,8 @@ function ExerciseBlock({ entryIdx, compact, dense, editing, onToggle, onToggleSi
       <div className="row" style={{ gap: 2, flex: 'none' }}>
         {entry.note && <button className="iconbtn" aria-label={t('Note')} title={t('Note')} style={{ color: 'var(--acc)' }}
           onClick={() => exerciseNoteSheet(entryIdx)}><Icon name="note" /></button>}
+        {onAskCoach && <button className="iconbtn" aria-label={t('Ask Coach about this exercise')} title={t('Ask Coach about this exercise')} style={{ color: 'var(--acc)' }}
+          onClick={onAskCoach}><Icon name="sparkles" /></button>}
         <button className="iconbtn" aria-label={t('More')} title={t('More')} onClick={openMore}><Icon name="more" /></button>
       </div>
     </div>
@@ -923,6 +931,12 @@ function ActiveWorkout() {
   const { startRest: liveRest, stopRest, stopWork, work, timer } = useUI()
   const A = S.active
   const editing = !!A.editingWorkoutId
+  const user = useStore(s => s.user)
+  const config = useStore(s => s.config)
+  const coachLocal = useStore(s => s.coachLocal)
+  // Anyone who has set up the Coach sees it here. Consent from before the current terms is
+  // renewed on its own page, which returns straight to this workout (CoachIntake).
+  const coachReady = !editing && !A.backfill && coachAvailable(config, user, { demo: DEMO, mobile: MOBILE, coachMode: coachLocal?.mode }) && !!S.coach?.profile
   // A past workout has no rest to time — the sets were done days ago. The work timer for
   // timed sets stays, since counting a hold is how its duration gets entered.
   const startRest = (A.backfill || editing) ? () => {} : liveRest
@@ -998,11 +1012,12 @@ function ActiveWorkout() {
   }
   const progressHighWater = useRef(A.entries.map(e => e.sets.filter(s => s.done).length))
   // The marks are index-keyed, and removing an exercise shifts every index above it down
-  // (removeActiveExercise splices). Re-baseline whenever the list length changes, otherwise a
-  // shifted exercise inherits its predecessor's mark and its real progress reads as a re-check.
+  // (removeActiveExercise splices; a Coach change can reorder them). Re-baseline whenever the
+  // list's order changes, otherwise a shifted exercise inherits another's mark and its real
+  // progress reads as a re-check.
   useEffect(() => {
     progressHighWater.current = A.entries.map(e => e.sets.filter(s => s.done).length)
-  }, [A.entries.length])
+  }, [A.entries.map(e => e.id).join()])
   // A removed set takes its tick with it (deleteActiveSet): the exercise's mark comes down to what
   // is ticked now, or ticking the next set would read as a re-check and start no rest. Only on the
   // way down; a set added or put back by Undo leaves the mark where it is.
@@ -1278,6 +1293,12 @@ function ActiveWorkout() {
   const blockProps = idx => ({
     editing,
     onSwap: () => swapExercise(idx),
+    onAskCoach: coachReady ? () => {
+      if (!hasConsent(S)) { nav('/coach/intake', { state: { fromWorkout: true } }); return }
+      let key = null
+      update(s => { ensureWorkoutEntryKeys(s.active); key = s.active?.entries?.[idx]?.key || null }, true)
+      if (key) useUI.getState().openSheet(close => <WorkoutCoachSheet close={close} anchorKey={key} />)
+    } : null,
     onMoveUp: () => moveUnitAt(idx, -1, true),
     onMoveDown: () => moveUnitAt(idx, 1, true),
     canMoveUp: canMoveActiveWorkoutEntry(A, idx, -1),
@@ -1410,7 +1431,10 @@ function ActiveWorkout() {
   // ⌄ that only leaves the screen (v1.3.11).
   const discardWorkout = () => confirmSheet({
     title: t('Discard workout?'), message: t('The sets you logged in this session will be lost.'), confirmText: t('Discard'), danger: true,
-    onConfirm: () => { update(s => { s.active = null }); stopRest(); stopWork(); nav('/home') },
+    onConfirm: () => {
+      if (coachReady) rememberDiscardedWorkout(A.id)
+      update(s => { s.active = null }); stopRest(); stopWork(); nav('/home')
+    },
   })
   // The header ⋯, in groups: the settings you change at the gym first (their own sheet, the same
   // values as Settings), then what to add, what to change about this workout, and Discard last.
