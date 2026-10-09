@@ -9,8 +9,9 @@ import { isWarmupRow } from '../lib/workout-model.js'
 import { fmtRest } from '../lib/duration.js'
 import { buildSessionEntry, builtOutOfProgression } from '../lib/session-start.js'
 import { joinSessionNoProg } from '../lib/session-noprog.js'
-import { appendLog } from '../lib/coach.js'
+import { appendLog, applyChangeSet, changeTitle } from '../lib/coach.js'
 import { applyWorkoutActions, coachExerciseConfig, ensureWorkoutEntryKeys, markWorkoutActions, needsGroupChoice, workoutCoachSession } from '../lib/workout-coach.js'
+import { routineChangesFor } from '../lib/workout-coach-routine.js'
 import { awaitedJob, JOB_ERRORS, isDeclined, jobErrorText, requestWorkout, resolvePending, settleAwaited, useCoachStatus } from '../lib/coach-api.js'
 import { swapGroupSheet } from '../sheets.jsx'
 import { discardedFor } from '../lib/watch-sync.js'
@@ -117,6 +118,7 @@ export default function WorkoutCoachSheet({ close, anchorKey }) {
   const onTextFocus = useSheetKeyboard(textRef)
   const [selected, setSelected] = useState(new Set())
   const [applied, setApplied] = useState(null)
+  const [routineSelected, setRoutineSelected] = useState(new Set())
   const [limitation, setLimitation] = useState(null)
   const [busy, setBusy] = useState(false)
   useExpireWorkoutProposal(anyPending, refresh)
@@ -171,13 +173,15 @@ export default function WorkoutCoachSheet({ close, anchorKey }) {
   const commit = (chosen, groupDisposition) => {
     const ui = useUI.getState()
     const restIdx = ui.timer?.forIdx
+    let before = null
     let restAt = null
     // A timed hold closes over indexes that are about to move.
     ui.stopWork()
     try {
       update(s => {
         ensureWorkoutEntryKeys(s.active)
-        const restKey = s.active.entries[restIdx]?.key
+        before = structuredClone(s.active)
+        const restKey = before.entries[restIdx]?.key
         applyWorkoutActions(s.active, chosen, entryMaker(s), { groupDisposition })
         restAt = restKey ? s.active.entries.findIndex(entry => entry.key === restKey) : null
         appendLog(s, workoutLog(pending, decisions(marked, new Set(chosen.map(a => a.id)))))
@@ -191,7 +195,8 @@ export default function WorkoutCoachSheet({ close, anchorKey }) {
     settleAwaited(pending.id)
     resolvePending({ accepted: chosen.map(a => a.id), rejected: marked.filter(a => !chosen.includes(a)).map(a => a.id) }).catch(() => {}).finally(refresh)
     const now = useStore.getState().S
-    setApplied({ reason: pending.reason })
+    setApplied({ reason: pending.reason, proposalId: pending.id, routine: routineChangesFor(chosen, now.routines || [], before, now.active) })
+    setRoutineSelected(new Set())
     // What hurt, and on which exercise: the line a future plan has to read on its own.
     const said = (now.active?.coachChat || []).filter(m => m.role === 'user').at(-1)?.text || ''
     setLimitation(anchor ? `${nameOf(anchor.id)}: ${said}` : said)
@@ -217,6 +222,25 @@ export default function WorkoutCoachSheet({ close, anchorKey }) {
     close()
   }
 
+  // Through the Coach's own change-set: snapshot first, so the Coach's Undo puts the routine back.
+  const updateRoutine = () => {
+    const chosen = applied.routine.filter(change => routineSelected.has(change.id))
+    if (!chosen.length) return
+    try {
+      update(s => {
+        const lastReview = s.coach?.lastReview ?? null
+        applyChangeSet(s, { id: applied.proposalId, summary: t('Routine changes from today’s workout.'), changes: chosen }, chosen.map(change => change.id))
+        // Not a review: the next one still reads everything trained since the last.
+        s.coach.lastReview = lastReview
+      })
+    } catch {
+      toast(t('Your routine changed since then, so nothing was updated.'))
+      return
+    }
+    toast(t('Routine updated'))
+    setApplied({ ...applied, routine: [] })
+  }
+
   const remember = () => {
     const note = limitation.trim()
     update(s => {
@@ -231,6 +255,13 @@ export default function WorkoutCoachSheet({ close, anchorKey }) {
   if (applied) return <div className="workout-coach">
     <h3>{t('Workout updated')}</h3>
     <p className="muted small">{t('Only unfinished work changed. Logged sets stay as they happened.')}</p>
+    {!!applied.routine.length && <>
+      <h4 className="sec">{t('Update your routine too?')}</h4>
+      {applied.routine.map(change => <ChangeRow key={change.id} c={change} S={S}>
+        <Check checked={routineSelected.has(change.id)} label={changeTitle(change, S)} onChange={on => setRoutineSelected(toggled(routineSelected, change.id, on))} />
+      </ChangeRow>)}
+      <Button variant="primary" disabled={!routineSelected.size} onClick={updateRoutine}>{t('Update routine')}</Button>
+    </>}
     {applied.reason === 'discomfort' && limitation !== null && <>
       <h4 className="sec">{t('Remember this for future plans?')}</h4>
       <textarea className="input" rows={3} maxLength={600} value={limitation} onChange={e => setLimitation(e.target.value)} />
